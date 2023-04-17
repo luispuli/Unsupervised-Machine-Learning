@@ -1,0 +1,637 @@
+---
+title: "Unsupervised Learning in Spatial Context: A Story through Data"
+author: Nacho Pulido Ruiz
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Motivation
+
+This project introduces the hypothesis that there is a geographical relationship (location) when grouping countries by a set of socioeconomic and demographic variables which will linger through time. One might also be interested in determining the most relevant variables among these which capture the maximum percentage variability in the data. This is useful to any analyst since it enables to perform dimensionality reduction as a prior step to constructing additional models (maybe supervised ones, if this is the goal). 
+Since we will count on panel data for our countries, we will study any potentially relevant changes that may have taken place since the 80s to the early 2010s. 
+
+What are the underlying patterns and structures in the relationships between various socio-economic variables, such as GDP growth rate, school years, and life expectancy, across different countries?
+
+## Data mining
+
+Our point of departure will be to load the relevant libraries required to perform our analysis. *janitor* and *forcats* are some packages that will enable the researcher to operate with factors and column name manipulation. Mice library will allow us to operate with an automatic missing value manipulation at later stages of the project. *cluster* and *mclust* libraries will help us later to perform cluster analysis on the second section of the project.
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(janitor)
+library(stringr)
+library(forcats)
+library(gganimate)
+library(mice)
+library(factoextra)
+library(cluster)
+library(mclust)
+library(igraph)
+```
+
+In order to bring the data together, many sources had to be resorted to and merged together into a single dataframe. The process of pre cleaning, string manipulation and/or recoding is documented below. For the sake of the reader, we will provide this information as a chunk of non-executable code and we will operate with the final version of the data for our statistical analysis:
+
+    # Read and clean data -----------------------------------------------------
+
+    gdp_growth <- read.csv("C:/Users/Asus/OneDrive/Desktop/Data TFM/API_NY.GDP.PCAP.KD.ZG_DS2_en_csv_v2_4770505.csv",
+             skip = 4)  %>% 
+      clean_names() %>% 
+      pivot_longer(starts_with("x"),
+                   names_to = "Year",
+                   values_to = "Gdppc_growth") %>% 
+      select(-contains(c("indicator","code"))) %>% 
+      mutate(Year = as.numeric(str_remove(Year,"x")))
+
+    pop_growth <- read.csv("C:/Users/Asus/OneDrive/Desktop/Data TFM/API_SP.POP.GROW_DS2_en_csv_v2_4770493.csv",
+             skip = 4) %>% 
+      clean_names() %>% 
+      pivot_longer(starts_with("x"),
+                   names_to = "Year",
+                   values_to = "Pop_growth") %>% 
+      select(-contains(c("indicator","code"))) %>% 
+      mutate(Year = as.numeric(str_remove(Year,"x")))
+
+    continent <- read.csv("C:/Users/Asus/OneDrive/Desktop/Data TFM/continents-according-to-our-world-in-data.csv") %>%
+      select(Entity,Continent)
+
+    school_years <- read.csv("C:/Users/Asus/OneDrive/Desktop/Data TFM/mean-years-of-schooling-long-run.csv")
+    names(school_years)[4] <- "School_years"
+    school_years <- school_years %>% 
+      select(-Code)
+
+    educ_expend <- read.csv("C:/Users/Asus/OneDrive/Desktop/Data TFM/total-government-expenditure-on-education-gdp.csv")
+    names(educ_expend)[4] <- "Educ_expend"
+    educ_expend <- educ_expend %>% 
+      select(-Code)
+    educ_expend
+
+    health <- read.csv("C:/Users/Asus/OneDrive/Desktop/Data TFM/life-expectancy-vs-healthcare-expenditure.csv")
+    names(health)[c(4,5)] <- c("Life_expec","health_expdpc")
+    health <- health %>% 
+      select(1:5, -2)
+
+    migration <- read.csv("C:/Users/Asus/OneDrive/Desktop/Data TFM/migration.csv") %>% 
+      select(contains("Net"), Year, Country) %>% 
+      select(c(1,3,4)) %>% 
+      clean_names()
+
+    Age <- read.csv("C:/Users/Asus/OneDrive/Desktop/Data TFM/median-age.csv") %>% 
+      select(c(1,3,4))
+    names(Age)[3] <- "Median_age"
+
+    marriage <- read.csv("C:/Users/Asus/OneDrive/Desktop/Data TFM/marriage-rate-per-1000-inhabitants.csv") %>% 
+      select(c(1,3,4))
+    names(marriage)[3] <- "marriage_per_1000"
+
+    civil_rights <- read.csv("C:/Users/Asus/OneDrive/Desktop/Data TFM/civil-liberties-fh.csv") %>%
+      select(c(1,3,4))
+    names(civil_rights)[3] <- "civil_rights"
+    #Recall 1 is best and 7 is worst
+
+    geography <- read.csv("C:/Users/Asus/OneDrive/Desktop/Data TFM/average-latitude-longitude-countries.csv") %>% 
+      select(c(2,3,4))
+
+    religion <- read.csv("C:/Users/Asus/OneDrive/Desktop/Data TFM/religion.txt",
+             sep = "") %>% 
+      select(Country, Feel) %>% 
+      rename("relig_feel" = "Feel")
+
+At this stage one can already have a taste of what we will find in the final version of the data. Notice we have operated with socio-economic variables in combination with demographics. Any unnecessary or empty columns were removed, and the particularity of our data calls for the inclusion of a time-dimension since we own yearly information in our rows.
+
+We merge all these information together:
+
+    # Merging datasets --------------------------------------------------------
+
+    df <- gdp_growth %>% 
+      left_join(pop_growth,
+                by = c("country_name","Year")) %>% 
+      left_join(continent,
+                by = c("country_name" = "Entity")) %>% 
+      left_join(school_years,
+                by = c("country_name" = "Entity","Year")) %>%
+      left_join(educ_expend,
+                by = c("country_name" = "Entity","Year")) %>% 
+      left_join(health,
+               by = c("country_name" = "Entity","Year")) %>% 
+      left_join(migration,
+                by = c("country_name" = "country","Year" = "year")) %>% 
+      left_join(Age,
+                by = c("country_name" = "Entity","Year")) %>% 
+      left_join(marriage,
+                by = c("country_name" = "Entity","Year")) %>% 
+      left_join(civil_rights,
+                by = c("country_name" = "Entity","Year"))%>% 
+      left_join(geography,
+                by = c("country_name" = "Country"))%>% 
+      left_join(religion,
+                by = c("country_name" = "Country"))
+
+Now we have complete information for each of our economies and by year. However, we will have to perform many transformations and devote some time for inspection and feature engineering if we want to operate with this data (We have NA´s, categorical variables, years without information etc.) Let´s read our final data and have a quick scan through the variables:
+
+```{r}
+df <- read.csv("Country_data.csv")
+head(df)
+```
+
+We have information on the country name, the GDP and population growth rates, the continent, expected school years, expenditure on educaction, life expectancy, net migration, median population age, a categorical variable accounting for civil rights, some geographical variables and religious feeling. In order to gain further insight into the variables taking part in the exploration and their hidden relationships, we will perform a descriptive analysis.
+
+## Descriptive analysis
+
+We begin with a boxplot analysis of the median age by faceting by continent and adding a time dimension by distinguishing between periods prior to and after 1990. Median age has been chosen in contrast to mean measures because it is more robust to outliers and provides information about the centre of the data.
+
+```{r}
+df %>% 
+  drop_na(Median_age,Continent) %>% 
+  ggplot()+
+  aes(Median_age, fill = Year >1990)+
+  geom_boxplot()+
+  facet_wrap(~Continent, scales = "free")+
+  theme_dark()+
+  theme(panel.grid = element_blank(),
+        strip.text = element_text(size = 10, face = "bold"))+
+  labs(x = "Median Age", fill = "Time after 1990")
+  
+```
+
+One notices how there is a significant shift in time in terms of median age, especially for America and Europe. We perceive the effect of ageing population and also how this difference is seldom noticed in Africa such that the median age has remained stagnant for both periods. This tells us a lot of information in terms of population structures in different continents.
+
+Now we will establish some relationships between our civil rights variable and the importance of religion in each economy. To take advantage of the time dimension just like in our previous plot, we will divide again the period in two (before and after the 90s) and make our conclusions:
+
+```{r}
+df %>% 
+  drop_na(relig_feel, civil_rights) %>% 
+  ggplot()+
+  aes(civil_rights,relig_feel, fill = Year > 1990)+
+  geom_bar(stat = "identity")+
+  facet_wrap(~Year>1990, scale = "free")+
+   theme_dark()+
+  theme(panel.grid = element_blank(),
+        strip.text = element_blank(),
+        plot.title = element_text(hjust = 0.5))+
+  labs(x = "Civil Rights", fill = "Time after 1990",
+       y = "Religion Importance",
+       title = "More religious economies  are likely \n to score worse in civil liberties")+
+  scale_fill_discrete(labels=c('Before 1990', 'After 1990'))
+```
+
+This graph conveys two main pieces of information. First, we see that those economies which hold the highest position in civil rights ranking (1,2 or 3) are usually the ones which devote less importance to religion (shortest bars in both periods). As religiousness increases, the probability to find economies where civil rights are lower than 3 rises. In addition, we see that some religious economies are starting to improve in terms of civil liberties (see how position 4 in civil rights now has the tallest bar).
+
+Next, we will plot information about the relationship between years of schooling and life expectancy. Again, we will categorize our information between periods prior to the 90s and years prior to 1990. We will also facet by continent to have a better understanding of the information:
+
+```{r}
+df %>% 
+  drop_na(Continent,Year) %>% 
+  ggplot()+
+  aes(School_years,Life_expec, color = Year<1990)+
+  geom_point()+
+  facet_wrap(~Continent)+
+  theme_dark()+
+  labs(x = "Years of schooling",
+       y = "Life expectancy",
+       color = "Time before 1990")+
+  theme(strip.text = element_text(size = 10, face = "bold"))
+  
+```
+
+One notices that there seems to be a positive and strong relationship between years of schooling and life expectancy, and this relationship holds diminishing returns for regions like Asia or North America. This means that we observe a concave relationship (increases tend to become weaker) whereas in Europe or Oceania the relationship seems to hold a linear with constant slope pattern. If we focus on Africa before the 90s, the slope is huge, which reveals that investing in education during those years had a significantly large outcome on life expectancy and living conditions for African economies.
+
+Now we will take advantage of our geography and computational skills to locate a bit better the religious variable in Europe:
+
+```{r}
+region <- df %>% 
+  filter(Continent == "Europe", Year == 1990) %>% 
+  select(country_name,relig_feel,civil_rights) %>% 
+  distinct()
+
+map_data("world") %>% 
+  inner_join(region, by =  c("region" = "country_name")) %>% 
+  ggplot(aes(long,lat))+
+  geom_polygon(aes( group = group, fill = relig_feel))+
+  theme_dark()+
+  theme(axis.title = element_blank())+
+  labs(title = "Religion Importance in Europe")
+  
+```
+
+This graph is interesting because it enables the researcher to quickly have an intuition of what are the countries in Europe devoting the most resources to religion. We see that Nordic countries happen to behave as the less religious whereas Poland, Romania or Italy account for the top positions. Spain is positioned somewhere in between these poles, but still being a more religious economy in comparison with France, although much lower than Portugal.
+
+Since we have temporal data, let´s play with it and add some dynamics to our plot. We will now shift to graph information about public health expenditure and life expectancy buy continent. We will resort to library *gganimate* to help us depict this information and add some transparency to the geometries to avoid overlapping. This takes a while, let´s be patient!
+
+```{r}
+
+df %>% 
+  drop_na(Continent, Life_expec,health_expdpc) %>% 
+  ggplot()+
+  aes(health_expdpc, Life_expec, fill = Continent)+
+  geom_point(shape = 21, color = "black", size = 8, alpha = 0.5)+
+  facet_wrap(~Continent, scales = "free")+
+  transition_time(Year)+
+  labs(subtitle = "{frame_time}")+
+  theme_dark()+
+  theme(strip.text = element_text(size = 10, face = "bold"))
+  
+```
+
+There seems to be a positive relation between these two variables that reinforces with time. We see that Europe and Asia manage to reach the top values in life expectancy and they also happen to be the ones devoting more resources to health expenditure. Notice how there are a bunch of countries in Africa which remain stagnant along the x-axis (no health investment at all) and their evolution in terms of life expectancy is much lower in comparison with other continents (the y-axis scale is different).
+
+## PCA analysis
+
+The next step in our unsupervised learning study will be to perform a PCA. PCA (Principal Component Analysis) is a dimensionality reduction technique used in machine learning and statistics to analyze and visualize high-dimensional data. This will enable the researcher to establish a feature importance analysis which can take place prior to working with other supervised learning techniques (predictive models). A PCA projects the information arising from the matrix dataset into a line, surface, volume or even higher dimensions depending on the amount of components we desire to include.
+
+We will first select those variables we are interested to keep for our analysis. This means that we shall only enter ratio variables (numerical) into the model and avoid the inclusion of missing observations (NAs in R). For the moment, let´s stick for data stemming from the year 2000 in order to avoid having repeated country name observations:
+
+```{r}
+df_new <- df %>% 
+  select(-X,Longitude,Latitude) %>% 
+  drop_na(Continent,School_years) %>% 
+  filter(Year == 2000)
+head(df_new)
+```
+
+One might be interested in the percentage of missing observations per variable:
+
+```{r}
+#Percentage of Na's?
+sapply(df_new, function(x) sum(is.na(x))*100/nrow(df_new))
+```
+
+Those variables suffering the most from Na´s are *marriage* and *Education expenditure*. Recall we have previously filtered for missing data on variables accounting for Continent and School years since we believe that this will be rows without much interest. In classical econometrics, categorical variables such as *Continent* are introduced with dummy variables with as many dummies as categories. However, one cantegory must be left as reference in order to avoid incurring in multicollinearity issues which might influence predictive accuracy. Since we are dealing with unsupervised learning at this stage, the user shall not worry of predictions or accuracy at this stage.
+
+We resort to an automatic way of computing the rest of missing values by taking advantage of package *mice*. It predicts the missing values of a candidate by using values from similar non-missing observations:
+
+```{r}
+m = 4 # number of multiple imputations
+mice_mod <- mice(df_new, m=m, method='rf')
+df_new <- complete(mice_mod, action=m)
+head(df_new)
+```
+
+We keep only the variables we are interested in for PCA analysis and drop the year column (notice this will only be a column containing thousands of "2000s" since we previously filtered for this year):
+
+```{r}
+pca_df <- df_new %>% 
+  select(-c(country_name,Year,Continent,Latitude,Longitude,Year))
+```
+
+The first principal component accounts for the largest variation in the data, the second principal component for the second-largest, and so on. By using the first few principal components, PCA can capture most of the information contained in the original variables, and reduce the data dimensionality while preserving the most important information.
+
+```{r}
+pca_model <- prcomp(pca_df,scale. = TRUE)
+summary(pca_model)
+```
+
+We notice from the summary of our model that the cumulative proportion becomes greater than 75% when we reach component number 4. This means that we can already account for more than 3/4 of the variability in our observations by resorting to the first 4 components. Each component outputs a linear combination of the variables which have been computed using the coefficients obtained from the eigenvectors from the original data (the weights). The percentage of explained variation is obtained with the weight that the eigenvalues hold over the summatory of all eigenvalues.
+
+Let´s plot this information:
+
+```{r}
+fviz_screeplot(pca_model,addlabels = TRUE, barcolor = "white")+
+  theme_dark()+
+  theme(panel.grid = element_blank())
+```
+
+The first principal component captures the maximum potential variance in the dataset, while each subsequent component captures the remaining variability. By combining the explained variances of the first few principal components, we can get an idea of how much of the total variance is maintained by the modified data. We see that, already with the first component, we are accounting for roughly 43% of variability in our data. From the 5th component, the marginal contribution of the nth principal component does not change significantly.
+
+```{r}
+first_component <- pca_model$rotation[,1] %>% 
+  as.data.frame() %>% 
+  rename(weights = 1)
+names <- rownames(first_component)
+first_component <- cbind(names,first_component)
+first_component %>% 
+  ggplot()+
+  aes(reorder(names,weights),weights)+
+  geom_bar(stat = "identity", color = "white", fill = "blue")+
+  theme_dark()+
+  theme(panel.grid = element_blank(),
+        axis.text.x = element_text(angle = 90),
+        axis.title.x = element_blank())+
+  labs(title = "First Principal Component")
+
+```
+
+We notice that the most important components are the median age, religious importance, school years and life expectancy. These variables hold, in absolute value, the greatest weights on the first principal component.
+
+```{r}
+fviz_contrib(pca_model, choice = "var", axes = 1)
+```
+
+The red dashed line on the graph above indicates the expected average contribution. This graph is almost analogous to the previous one, and the analyst can notice with ease which are the most important features in this first component.
+
+Since we have the advantage of accounting for temporal data, let´s repeat our analysis by shifting the time period to 2015 and record any changes in the feature importance that may have taken place. We filter our original data for 2015, exclude categorical variables and apply the *mice* operator again. We plot the variable contribution to the first principal component and compare with our previous scenario:
+
+```{r}
+new_period <- df %>% 
+  select(-X,Longitude,Latitude) %>% 
+  drop_na(Continent,School_years) %>% 
+  filter(Year == 2015)
+m = 4 # number of multiple imputations
+mice_mod <- mice(new_period, m=m, method='rf')
+new_period <- complete(mice_mod, action=m)
+new_period <- new_period %>% 
+  select(-c(country_name,Year,Continent,Latitude,Longitude,Year))
+pca_model_2 <- prcomp(new_period,scale. = TRUE)
+fviz_contrib(pca_model_2, choice = "var", axes = 1)
+```
+
+The most important contributions are still coming from median age and school years, but we notice how "religious feeling" has been replaced by "health expenditure" to complete the top 4. This means that, 15 years later, we are able to capture less variability in our data when using the religious variable, but life expectancy and health investment have grown stronger (recall these two variables where heavily related at our desciptive analysis stage).
+
+Now we will use our first component to rank our countries (by score). We will save the country names by using the *pull* function and do the same with the continent for plotting purposes
+
+```{r}
+names <- df_new %>% 
+  filter(Year == 2000) %>% 
+  pull(country_name)
+Continent <-  df_new %>% 
+  filter(Year == 2000) %>% 
+  pull(Continent)
+names[order(pca_model$x[,1], decreasing=T)][1:10]
+```
+
+The best countries according to our criteria are Sweden, Norway, Switzerland, Denmark, Japan, Luxembourg, Germany, United States, Finland and the Netherlands. These are all economies with high life expectancy and civil rights, so it makes sense that our first component has extracted these names.
+
+## Second component
+
+```{r}
+fviz_contrib(pca_model, choice = "var", axes = 2)
+
+```
+
+In the case of the second principal component, the cards are shifted and we obtain "net migration", "population growth" and "health expenditure" as the most relevant variables. Notice how the variables which contributed the most in our first principal component are now revealed as residual in our second component.
+
+Now we will plot this information colouring by continent and seeking to establish some kind of pattern. To do this, we will have to append the information of the first 2 components and merge this with the data we had previously pulled containing country names and continent:
+
+```{r}
+data.frame(z1=pca_model$x[,1],z2=pca_model$x[,2],names,Continent) %>% 
+  ggplot(aes(z1,z2,label=names,color=Continent)) + geom_point(size=0) +
+  labs(title="First two principal components (scores)", x="PC1", y="PC2")+
+  theme_bw() +theme(legend.position="bottom") + geom_text(size=3, hjust=0.6, vjust=0, check_overlap = TRUE) 
+```
+
+The user should realize how similar type of economies pertaining to the same continent (see green or light blue pattern) are located in clusters very close to each other in our PCA plot. Recall that we were able to explain around 60% of the variability in the data with our first two components.
+
+## Raw Data -> Clustered Data
+
+We will now shift our analysis to develop some clustering models such that, in relation to our research question, one shall be interested in joining "similar" observations by searching for groups of countries which might share similar characteristics. The key element when dealing with cluster analysis lies in the fact that within cluster variation must be as negligible as possible whereas between cluster variability must remain a maximum (similar observations inside a cluster but groups must be easily distinguishable).
+
+Just as we did before, let´s complete the rest of our data with the *mice* operator
+
+```{r}
+m = 4 # number of multiple imputations
+mice_mod <- df %>% 
+  drop_na(net_migration_rate) %>% 
+  mice( m=m, method='rf')
+df_cluster <- complete(mice_mod, action=m)
+head(df_cluster)
+```
+
+We will have to select the most relevant variables for our analysis since these algorithms are sensitive and will homogeneously weight each covariate (attribute). We will base these criteria on the results we previously obtained on PCA to determine the most relevant variables to be included for further analysis. Notice we will filter for data belonging to 1980 in order to repeat the analysis several decades later to explore any relevant divergence:
+
+```{r}
+df_cluster <- df_cluster %>% 
+  filter(Year == 1980) %>% 
+  select(country_name,relig_feel,Life_expec,marriage_per_1000,health_expdpc,civil_rights,School_years)
+names <- df_cluster$country_name
+df_cluster <-  df_cluster %>% 
+   select(-country_name)
+head(df_cluster)
+```
+
+In order to make the rest of the plotting to work, we had to save a "names" vector accounting for all the different countries.
+
+We begin by setting the initial amount of clusters one wishes to obtain from the model.The amount of repeats will be set to 10000 and we will resort to a k-means analysis in which the different centers will be reloaded through an iterative analysis that will minimize the given distance between points.
+
+```{r}
+k <- 4
+model <- kmeans(scale(df_cluster),centers = k,nstart = 100000)
+
+```
+
+Cluster means refer to the average of each of the clusters for each of the variables (one country is located at the mean of each cluster), these are the scaled values for the country in the center. remember the interpretation is the numebr of standard deviations above or below, this is done to understand the center of the cluster.
+
+It will be useful for us to understand which are the most populated clusters:
+
+```{r}
+centers <- model$centers 
+model$clu %>% 
+  as.data.frame() %>% 
+  #Rename column to ease plotting
+  rename(cluster = ".") %>% 
+  #group by cluster and count frequency
+  group_by(cluster) %>% 
+  count() %>% 
+  ggplot()+
+  #reorder the data 
+  aes(reorder(as.factor(cluster),n),n) %>% 
+  #set the stat link to identity 
+  geom_bar(stat = "identity", fill = "blue")+
+  labs(y = "Frequency",x = "Cluster",
+       title = "Cluster frequency")+
+  theme_dark()+
+  theme(panel.grid = element_blank())
+  
+```
+
+One notices that there is a clearly most common cluster a country arrives to, tightly followed by the next cluster. There are very few elements (countries) inside the lest frequent cluster , but we will explore these countries at a later stage.
+
+Let´s plot information for the means obtained for the first cluster:
+
+```{r}
+barplot(centers[1,], las=2, col="darkblue")+
+  theme_dark()
+```
+
+We can already grasp useful information on the performance of the first country. However, this information pertains to the first cluster, we will now plot all the groups together to understand the characteristics making each group to be distinct.
+
+What do we mean by similarity? The similarity between data points is a crucial aspect of clustering algorithms, as it determines which points are grouped together and which points are separated into different clusters. Data points that are more similar to each other are more likely to be assigned to the same cluster, while points that are dissimilar are more likely to be assigned to different clusters.
+
+We will visualize the cluster average of each cluster to understand which are the better positioned groups:
+
+```{r}
+means <- centers %>% 
+  as.data.frame() %>% 
+  mutate(cluster = row_number()) %>% 
+  pivot_longer(-cluster,names_to = "attribute")
+
+```
+
+Now we have an ordered and classified data frame containing information of variable means for each of the clusters which we can take advantage of to plot all these information:
+
+```{r}
+means %>% 
+  ggplot()+
+  #Set attributes as factors
+  aes(as.factor(attribute),value, fill = as.factor(cluster))+
+  #Set the geom identity
+  geom_bar(stat = "identity")+
+  #facet by cluster
+  facet_wrap(~cluster)+
+  theme_dark()+
+  #rotate axis attributes
+  theme(axis.text.x = element_text(angle = 90),
+        #remove axis title to focus on the plot
+        axis.title.x = element_blank(),
+        panel.grid = element_blank(),
+        #remove legend
+        legend.position = "none")
+```
+
+**Note: When referring to clusters we will refer to a generic group since this algorithm might name different each cluster everytime the code is run**
+
+Recall that the interpretation of this plot is the number of standard deviations above or below (since we are dealing with scaled data) for each of the variables inside each cluster. There is one cluster that does not seem to be performing very well in terms of life expectancy or average school years of individuals and it is the continent holding the most importance on religious identity. On the other hand, one notices another cluster which seems a satisfactory place to live in terms of public health expenditure or number of school years, but it is the worst in terms of civil rights activity. One of the clusters is interesting and distinctive in the sense that all categories are close to 0, which means that all attributes are close to the mean, so this would be an "average" continent to live in. This graph also conveys that there are no similar clusters such that the researcher spots clear differences in the means of these attributes.
+
+## Clusplot
+
+We will now study the potentially optimal number of clusters with a clusplot analysis:
+
+```{r}
+
+fviz_nbclust(scale(df_cluster),kmeans,method = "silhouette",k.max = 10,nstart = 10000)
+
+```
+
+The optimal number of clusters in terms of noise according to this plot is 2, but this is a relatively small figure and we desire a more interesting grouping for our countries.
+
+```{r}
+fviz_nbclust(scale(df_cluster),kmeans,method = "gap_stat",k.max = 10,nstart = 100)
+```
+
+The gap statistic compares the total within-cluster variation for different values of k (number of clusters) with the expected within-cluster variation under a null reference distribution. This plot states that we should go for 3 clusters, this is closer to the k=4 clusters we decided to take advantage of. For the moment, we will stick to 4 clusters since we did not see 2 identical groups when we analyzed the separate means on previous plots.
+
+Let´s plot this information in a map by taking advantage of our spatial data and notice any significant pattern. We will use *geom_polygon* inside ggplot and transform the value assigned to each cluster to a factor.
+
+Notice we will have one issue when plotting USA since this is the name used by ggplot by default when calling the function *map_data*, but the name that we had on our data is "United States". Let´s also recode this name:
+
+```{r}
+map <-  data.frame(country=names, value=model$cluster)
+map$country[map$country == "United States"] <- "USA"
+```
+
+Now we can enter this information easily into ggplot:
+
+```{r}
+map_data("world") %>% 
+  inner_join(map, by =  c("region" = "country")) %>% 
+  ggplot(aes(long,lat))+
+  geom_polygon(aes( group = group, fill = as.factor(value)))+
+  labs(fill = "Cluster")
+```
+
+We do notice that some African economies belong to the same cluster that many south American countries. We also see many similarities between European countries, Australia and North America. We notice a cluster that has just a few economies in it, maybe we could have gone with 3 clusters for this specific variables.
+
+Let´s take advantage of our temporal data and shift the analysis some decades to the future. We will deal with NA`s, filter the data, perform feature selection and clean the names for our map in one step following the previous code (notice now data pertains to 2015):
+
+```{r}
+m = 4 # number of multiple imputations
+mice_mod <- df %>% 
+  drop_na(net_migration_rate) %>% 
+  mice( m=m, method='rf')
+df_cluster <- complete(mice_mod, action=m)
+df_cluster <- df_cluster %>% 
+  filter(Year == 2015) %>% 
+  select(country_name,relig_feel,Life_expec,marriage_per_1000,health_expdpc,civil_rights,School_years)
+names <- df_cluster$country_name
+df_cluster <-  df_cluster %>% 
+   select(-country_name)
+k <- 4
+model <- kmeans(scale(df_cluster),centers = k,nstart = 10000)
+map <-  data.frame(country=names, value=model$cluster)
+map$country[map$country == "United States"] <- "USA"
+```
+
+```{r}
+map_data("world") %>% 
+  inner_join(map, by =  c("region" = "country")) %>% 
+  ggplot(aes(long,lat))+
+  geom_polygon(aes( group = group, fill = as.factor(value)))+
+  labs(fill = "Cluster")
+```
+
+We still see European countries sticking together with Australia and North America several decades after. One major difference with respect to 1980 is the fact that South American regions are no longer linked to Africa, but they are now clustered together with Asian economies. This is likely to mean that these economies have experienced a period of economic and social prosperity which African economies have not. 
+
+
+## Hierarchical clustering for robustness
+
+Finally, let´s perform a robust analysis by switching to another clustering technique and compare the results with the previous ones. We need to decide first the distance and linkage:
+
+```{r}
+m = 4 # number of multiple imputations
+mice_mod <- df %>% 
+  drop_na(net_migration_rate) %>% 
+  mice( m=m, method='rf')
+df_cluster <- complete(mice_mod, action=m)
+df_cluster <- df_cluster %>% 
+  filter(Year == 2015) %>% 
+  select(country_name,relig_feel,Life_expec,marriage_per_1000,health_expdpc,civil_rights,School_years)
+names <- df_cluster$country_name
+df_cluster <-  df_cluster %>% 
+   select(-country_name)
+
+d <- dist(scale(df_cluster),method = "euclidean")
+hc <- hclust(d,method = "ward.D2")
+```
+
+We will plot a classical dendrogram:
+
+```{r}
+fviz_dend(x = hc, 
+          k=4,
+          palette = "jco", 
+          rect = TRUE, rect_fill = TRUE, cex=0.5,
+          rect_border = "jco"          
+)
+```
+
+
+We can already notice our 4 clusters and easily spot the one containing the least amount of economies and the largest one. However, this plot is suitable when the sample size is relatively smaller since one is not able to distinguish the names of each economy. Let's use a phylogenic tree:
+
+
+```{r}
+hc$labels <- names
+fviz_dend(x = hc,
+          k = 4,
+          color_labels_by_k = TRUE,
+          cex = 0.8,
+          type = "phylogenic",
+          repel = TRUE)+  labs(title="Clustering our world through data") + theme(axis.text.x=element_blank(),axis.text.y=element_blank())
+```
+
+
+```{r}
+groups.hc <- cutree(hc, k = 4)
+map <-  data.frame(country=names, value= groups.hc)
+map$country[map$country == "United States"] <- "USA"
+map_data("world") %>% 
+  inner_join(map, by =  c("region" = "country")) %>% 
+  ggplot(aes(long,lat))+
+  geom_polygon(aes( group = group, fill = as.factor(value)))+
+  labs(fill = "Cluster")
+
+```
+
+We find no significant differences when resorting to this hierarchical method since european countries are still clustered together with North America and Australia, and South American economies belong to the same group as many Asian Economies but also some European ones. Hence we can conclude that our analysis is robust enough and accept our null hypothesis that there is a spatial relationship of this variables that lingers through time. 
+
+## Conclusions
+
+One of the most relevant results stemming from the descriptive analysis was the perceived effect of ageing population within many MEDs which is not observed in African economies when analysing the Median age. This contains information about the population structure differences within these continents. 
+
+The Principal Component analysis revealed that with the first 4 components we were already able to explain more than 3/4 of the variability in the data. We also discovered that variables like median age or religious feeling are actually among the most important ones in explaining such a cumulative variability. Our PCA plots was already clustering together countries which had a spatial pattern when we resorted to our map visualizations. 
+These results were analogous and robust through time to the ones obtained from clustering analysis:
+
+- 4 clearly distinctive clusters with little overlapping
+- European economies group together with North America and Australia
+- South American countries used to cluster with Africa some decades ago but they are more similar to Asian regions nowadays
+- We cannot reject the null that there is spatial relation between the variables selected for the study in our countries, and this relationship seems stagnant decades later
+ 
+## References
+
+- https://ourworldindata.org/
+- github.com/albertyw/avenews
+- https://www.bu.edu/cura/programs/religiousdemography/
